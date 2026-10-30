@@ -688,37 +688,46 @@ function compose(spec){
   const headH = Math.max(1, chin-headTop);
   const shoulderW = (g.shoulderW||0)*s;
 
-  // 构图：头部占高约 55%；若肩膀放不下则缩小到双肩 90% 入画（两侧各留 5%）
+  // 构图（人像优先）：
+  // ① 基准：头部占高 55%、头顶留白 10%，人脸水平居中
+  // ② 肩宽规则只允许适度缩小（头部仍至少占 45%），防止手臂等宽前景把人压得太小
+  // ③ 软约束：尽量让取景窗口完整落在照片内（画面更自然）；照片实在放不下时
+  //    允许窗口出界——出界区域由纯色背景填充，绝不允许窗口跑偏挤压人像
   let k = (0.55*H)/headH;
   if(shoulderW > 8){
     const kS = (0.90*W)/shoulderW;
-    if(kS < k) k = kS;
+    const kHeadMin = (0.45*H)/headH;
+    if(kS < k) k = Math.max(kS, kHeadMin);
   }
-  // 源窗口（照片坐标）：头顶留白 10%
-  let sy = headTop - (H*0.10)/k;
-  let sx = cx - (W/2)/k;
-  const sw = W/k, sh = H/k;
-  // 边界钳制：窗口不能跑出照片
-  if(sx < 0) sx = 0;
-  if(sx + sw > p.width) sx = p.width - sw;
-  if(sy < 0) sy = 0;
-  if(sy + sh > p.height) sy = p.height - sh;
+  const kTop    = headTop > 30 ? (0.10*H)/headTop : 0;                 // 窗口顶不出照片
+  const kBottom = (p.height-headTop) > 30 ? (0.90*H)/(p.height-headTop) : 0; // 窗口底不出照片
+  const kLeft   = cx > 30 ? (0.50*W)/cx : 0;                           // 左不出界
+  const kRight  = (p.width-cx) > 30 ? (0.50*W)/(p.width-cx) : 0;       // 右不出界
+  const kFit = Math.max(kTop, kBottom, kLeft, kRight);
+  if(k < kFit) k = kFit;
 
-  // 人像层：照片窗口直接画到输出分辨率（双线性）
+  // 源窗口（照片坐标）：以头部为锚，头顶留白 10%（出界安全，见上面③）
+  const sy = headTop - (H*0.10)/k;
+  const sx = cx - (W/2)/k;
+  const sw = W/k, sh = H/k;
+  state.lastGeom = {k, sx, sy, sw, sh, W, H, headTop, chin, cx, shoulderW, photoW:p.width, photoH:p.height};
+
+  // 人像层：整张照片按 k 缩放画入（目标坐标映射）——
+  // 不用 source rect 裁剪：出界时浏览器会按比例裁剪目标区导致人像错位挤压
   const port = mkCanvas(W,H);
   const pctx = port.getContext('2d', {willReadFrequently:true});
   pctx.imageSmoothingEnabled = true;
   try{ pctx.imageSmoothingQuality = 'high'; }catch(e){}
-  pctx.drawImage(p, sx, sy, sw, sh, 0, 0, W, H);
+  pctx.drawImage(p, -sx*k, -sy*k, p.width*k, p.height*k);
 
-  // mask 与人像同一几何：先等比上采样到照片分辨率（缓存），再按源窗口裁到输出分辨率
+  // mask 与人像同一几何：先等比上采样到照片分辨率（缓存），再同样以目标坐标映射画入
   if(!state.photoMask) state.photoMask = pyramidTo(state.maskSmall, p.width, p.height);
   const photoMask = state.photoMask;
   const mask = mkCanvas(W,H);
   const mctx = mask.getContext('2d', {willReadFrequently:true});
   mctx.imageSmoothingEnabled = true;
   try{ mctx.imageSmoothingQuality = 'high'; }catch(e){}
-  mctx.drawImage(photoMask, sx, sy, sw, sh, 0, 0, W, H);
+  mctx.drawImage(photoMask, -sx*k, -sy*k, p.width*k, p.height*k);
 
   // 关键：金字塔低通把 mask 过渡带从 1~2px 拉宽到 4~6px（消除 256 级模型阶梯），
   // 再用 S 曲线收成平滑软边——主流换底工具的"羽化"等效实现，全程不依赖 ctx.filter
